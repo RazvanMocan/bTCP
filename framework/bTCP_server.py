@@ -10,6 +10,8 @@ SYN = 1
 ACK = 2
 FIN = 4
 
+short_max = 2 ** 16 - 1
+
 
 def checkintegrity(payload):
     checksum = unpack("I", payload[12:16])[0]
@@ -33,47 +35,58 @@ def build_acknowlwdge(stream_id, syn_nr, ack_nr, flags):
         syn_nr = randint(0, 2**16 - 1)
         win = args.window
     elif flags == FIN:
-        packet.append(create_packet(ack_nr, d, f, 1, stream_id, syn_nr, win))
+        ack_nr += 1
+        packet.append(create_packet(stream_id, syn_nr, ack_nr, ACK, win, length, d))
         f = FIN
-        syn_nr += 1
+    elif flags == ACK:
+        length = 0
     else:
         d = 'K'
         length = 1
 
-    packet.append(create_packet(ack_nr, d, f, length, stream_id, syn_nr, win))
-    return packet
+    print("\nSend:")
+    print(stream_id, syn_nr, ack_nr, f, win, length, d)
+    print()
+    packet.append(create_packet(stream_id, syn_nr, ack_nr, f, win, length, d))
+    return ack_nr, packet
 
 
-def create_packet(ack_nr, d, f, length, stream_id, syn_nr, win):
+def create_packet(stream_id, syn_nr, ack_nr, f, win, length, d):
     d = d.encode()
+    syn_nr %= short_max
+    ack_nr %= short_max
     aux_data = pack("IHHBBH1000s", stream_id, syn_nr, ack_nr, f, win, length, d)
-    check_sum = crc32(aux_data)
-    packet = pack(header_format, stream_id, syn_nr, ack_nr, f, win, length, check_sum, d)
-    return packet
+    check_sum = pack("I", crc32(aux_data))
+    return aux_data[:12] + check_sum + aux_data[12:]
 
 
-def checkorder(syn_nr, prev):
+def checkorder(syn_nr, prev, addition):
     if prev is None:
         return True
-    elif syn_nr != prev:
+    elif syn_nr != prev + addition:
         return False
     return True
 
 
-def react(payload, f, s_id, prev):
+def react(payload, f, s_id, prev, expected):
     if checkintegrity(payload) is False:
-        return prev
+        return f, expected, prev
     stream_id, syn_nr, ack_nr, flags, win, length, check, load = unpack(header_format, payload)
+    print("\nReceived:")
+    print(stream_id, syn_nr, ack_nr, flags, win, length, check, load)
+    print()
     if stream_id != s_id:
         print("There was a problem with the session")
         print(stream_id, s_id)
         exit(1)
-    print(prev)
-    if checkorder(syn_nr, prev) is False:
-        return flags, prev
+    if checkorder(syn_nr, expected, 0) is False:
+        print("wrong order")
+        print(syn_nr, expected)
+        return f, expected, prev
     f.write(load[:length])
     f.flush()
-    return flags, build_acknowlwdge(stream_id, ack_nr, syn_nr + length, flags)
+    ack_nr, packet = build_acknowlwdge(stream_id, ack_nr, (syn_nr + length) % short_max, flags)
+    return flags, ack_nr, packet
 
 
 def close_connection(connection_socket):
@@ -81,7 +94,7 @@ def close_connection(connection_socket):
     poller.unregister(connection_socket)
     aux[connection_socket][0].close()
     del aux[connection_socket]
-    del fd_to_socket[connection_socket]
+    del fd_to_socket[connection_socket.fileno()]
     del close[s]
     connection_socket.close()
     # Remove message queue
@@ -90,7 +103,7 @@ def close_connection(connection_socket):
 
 # Handle arguments
 parser = argparse.ArgumentParser()
-parser.add_argument("-w", "--window", help="Define bTCP window size", type=int, default=100)
+parser.add_argument("-w", "--window", help="Define bTCP window size", type=int, default=5)
 parser.add_argument("-t", "--timeout", help="Define bTCP timeout in milliseconds", type=int, default=100)
 parser.add_argument("-o", "--output", help="Where to store file", default="tmp.file")
 args = parser.parse_args()
@@ -120,6 +133,7 @@ fd_to_socket = {sock.fileno(): (sock, server_ip), }
 aux = {}
 close = {}
 
+
 while True:
                                                                                                                                             
     # Wait for at least one of the sockets to be ready for processing
@@ -130,6 +144,7 @@ while True:
 
         # Retrieve the actual socket from its file descriptor
         (s, client_address) = fd_to_socket[fd]
+        print(client_address)
 
         # Handle inputs
         if flag & (select.POLLIN | select.POLLPRI):
@@ -144,30 +159,32 @@ while True:
                 poller.register(connection, READ_WRITE)
 
                 file = open(args.output + client_address[0] + str(client_address[1]), "wb")
-                aux[connection] = [file, unpack("I", data[:4])[0], None]
-                _, response = react(data, *aux[connection])
+                aux[connection] = [file, unpack("I", data[:4])[0], None, unpack("H", data[4:6])[0]]
+                _, seq_nr, response = react(data, *aux[connection])
 
                 # Give the connection a queue for data we want to send
                 message_queues[connection] = Queue()
                 for r in response:
                     message_queues[connection].put(r)
                 aux[connection][2] = response
+                aux[connection][3] = seq_nr
                 close[connection] = 0
-                print(response)
             else:
                 data = s.recv(packet_size)
 
                 if data:
                     # A readable client socket has data
                     print('received "{}" from {}'.format(data, client_address))
-                    flag, response = react(data, *aux[s])
+                    flag, seq_nr, response = react(data, *aux[s])
                     for r in response:
                         message_queues[s].put(r)
                     aux[s][2] = response
+                    aux[s][3] = seq_nr
                     if close[s] == 2 and flag == ACK:
                         close[s] = True
                     else:
                         close[s] = len(response)
+                    poller.modify(s, READ_WRITE)
                     # Add output channel for response
                 else:
                     # Interpret empty result as closed connection
@@ -186,12 +203,15 @@ while True:
                 print('output queue for', client_address, 'is empty')
                 poller.modify(s, READ_ONLY)
             else:
-                next_msg = message_queues[s].get_nowait()
-                # No messages waiting so stop checking for writability.
-                print('sending "%s" to %s' % (next_msg, client_address))
-                s.sendto(next_msg, client_address)
+                while not message_queues[s].empty():
+                    next_msg = message_queues[s].get_nowait()
+                    # No messages waiting so stop checking for writability.
+                    print('sending')
+                    print(unpack(header_format, next_msg))
+                    s.sendto(next_msg, client_address)
                 if close[s] is True:
                     close_connection(s)
+
 
         elif flag & select.POLLERR:
             print('handling exceptional condition for', client_address)
