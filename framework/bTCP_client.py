@@ -138,7 +138,7 @@ while inputs:
             else:
                 if save is None:
                     save = (syn_nr, ack_nr, ack_nr, length)
-                if args.window !=0:
+                if args.window != 0:
                     syn_nr, ack_nr, expected, length = save
                 for i in range(0, args.window):
                     ack_nr += length
