@@ -5,7 +5,6 @@ from struct import *
 from zlib import crc32
 from select import select
 from queue import Queue
-from time import sleep
 
 short_max = 2 ** 16 - 1
 
@@ -70,10 +69,10 @@ FIN = 4
 finish = False
 save = None
 
+
 def close_socket(soc):
     print("close")
     inputs.remove(soc)
-    outputs.remove(soc)
     soc.close()
 
 
@@ -81,38 +80,43 @@ def send_response(head, dat, l):
     packet = makepacket(head, dat)
     queue.put(packet)
     last.append(((ack_nr + l) % short_max, packet))
+    outputs.append(sock)
 
 
 while inputs:
-
     # Wait for at least one of the sockets to be ready for processing
     # print('\nwaiting for the next event')
-    readable, writable, exceptional = select(inputs, outputs, inputs, args.timeout / 1000)
+    readable, writable, exceptional = select(inputs, outputs, inputs, 1 / args.timeout)
     # Handle inputs
     for s in readable:
-        data, addr = s.recvfrom(1016)
+        try:
+            data, addr = s.recvfrom(1016)
+        except BlockingIOError:
+            continue
 
         if port == -1:
             destination_ip = addr[0]
             destination_port = addr[1]
 
         if data:
-            print('received "%s" from %s' % (data, (destination_ip, destination_port)))
             stream_id, syn_nr, ack_nr, flags, win, length, check, _ = unpack(header_format, data)
+
             print("\nreceived")
             print(stream_id, syn_nr, ack_nr, flags, win, length, check)
             print()
             # sleep(1)
 
             if crc32(bytes(data[:12] + data[16:])) != check:
+                print("corupt")
                 continue
             data = ''
+            print("integrity ok")
 
             expected = last[0]
             if expected[0] + (1 if flags == ACK or flags == FIN else 0) != ack_nr:
-                print(expected[0] + (1 if flags == ACK else 0), ack_nr)
-                print("Wrong order")
-                queue.put(expected[1])
+                # print(expected[0] + (1 if flags == ACK else 0), ack_nr)
+                print("\nWrong order")
+                print(expected[0], ack_nr)
                 continue
 
             if finish is True:
@@ -129,9 +133,6 @@ while inputs:
                 finish = True
                 syn_nr += 1
                 send_response((stream_id, ack_nr, syn_nr, ACK, 0, 0), data, 0)
-                # packet = makepacket((stream_id, ack_nr, syn_nr, ACK, 0, 0), data)
-                # queue.put(packet)
-                # last.append((ack_nr, packet))
 
             elif flags == ACK:
                 continue
@@ -146,9 +147,6 @@ while inputs:
                     length = len(d)
                     expected += length
                     send_response((stream_id, ack_nr, syn_nr, 0, 0, length), d, expected - ack_nr)
-                    # packet = makepacket((stream_id, ack_nr, syn_nr, 0, 0, length), d)
-                    # queue.put(packet)
-                    # last.append((expected, packet))
                     syn_nr += 1
                     save = (syn_nr, ack_nr, expected, length)
 
@@ -161,36 +159,30 @@ while inputs:
                 elif len(last) == 1:
                     syn_nr += 1
                     send_response((stream_id, ack_nr, syn_nr, FIN, 0, 0), data, 0)
-                    # packet = makepacket((stream_id, ack_nr, syn_nr, FIN, 0, 0), data)
-                    # queue.put(packet)
-                    # last.append((ack_nr, packet))
-            print(len(last))
             del last[0]
-            print(len(last))
 
     # Handle outputs
     for s in writable:
-        written = False
         while queue.empty() is False:
-            written = True
             next_msg = queue.get_nowait()
             print('\nsending')
             print(unpack(header_format, next_msg))
             print()
             # sleep(1)
             s.sendto(next_msg, (destination_ip, destination_port))
-        if written:
-            print('-'*15)
-            # Handle "exceptional conditions"
+        outputs.remove(s)
 
+    # Handle "exceptional conditions"
     for s in exceptional:
         print('handling exceptional condition for')
         # Stop listening for input on the connection
         close_socket(s)
 
     if not (readable or writable or exceptional):
-        if finish is True:
+        print("timeout", finish, len(last), len(outputs))
+        if finish is True and len(last) == 0:
             close_socket(sock)
         else:
+            outputs.append(sock)
             for packet in last:
                 queue.put(packet[1])

@@ -44,9 +44,9 @@ def build_acknowlwdge(stream_id, syn_nr, ack_nr, flags):
         d = 'K'
         length = 1
 
-    print("\nSend:")
-    print(stream_id, syn_nr, ack_nr, f, win, length, d)
-    print()
+    # print("\nSend:")
+    # print(stream_id, syn_nr, ack_nr, f, win, length, d)
+    # print()
     packet.append(create_packet(stream_id, syn_nr, ack_nr, f, win, length, d))
     return ack_nr, packet
 
@@ -61,28 +61,31 @@ def create_packet(stream_id, syn_nr, ack_nr, f, win, length, d):
 
 
 def checkorder(syn_nr, prev, addition):
+    expected = (prev + addition)
+    print("order", syn_nr, expected)
     if prev is None:
-        return True
-    elif syn_nr != prev + addition:
-        return False
-    return True
+        return 0
+    elif syn_nr < expected or abs(syn_nr - expected) > expected:
+        return 1
+    elif syn_nr > expected:
+        return 2
+    return 0
 
 
 def react(payload, f, s_id, prev, expected):
     if checkintegrity(payload) is False:
         return f, expected, prev
     stream_id, syn_nr, ack_nr, flags, win, length, check, load = unpack(header_format, payload)
-    print("\nReceived:")
-    print(stream_id, syn_nr, ack_nr, flags, win, length, check, load)
-    print()
+    # print("\nReceived:")
+    # print(stream_id, syn_nr, ack_nr, flags, win, length, check, load)
+    # print()
     if stream_id != s_id:
         print("There was a problem with the session")
-        print(stream_id, s_id)
         exit(1)
-    if checkorder(syn_nr, expected, 0) is False:
-        print("wrong order")
-        print(syn_nr, expected)
+    if checkorder(syn_nr, expected, 0) == 2:
         return f, expected, prev
+    elif checkorder(syn_nr, expected, 0) == 1:
+        return f, expected, build_acknowlwdge(stream_id, ack_nr, (syn_nr + length) % short_max, flags)[1]
     f.write(load[:length])
     f.flush()
     ack_nr, packet = build_acknowlwdge(stream_id, ack_nr, (syn_nr + length) % short_max, flags)
@@ -90,22 +93,26 @@ def react(payload, f, s_id, prev, expected):
 
 
 def close_connection(connection_socket):
-    print("\n\nclosing\n\n")
     poller.unregister(connection_socket)
     aux[connection_socket][0].close()
     del aux[connection_socket]
     del fd_to_socket[connection_socket.fileno()]
-    del close[s]
+    if s in close:
+        del close[s]
     connection_socket.close()
     # Remove message queue
     del message_queues[connection_socket]
+
+    #Uncomment for test purpose
+    # sock.close()
+    # exit(0)
 
 
 # Handle arguments
 parser = argparse.ArgumentParser()
 parser.add_argument("-w", "--window", help="Define bTCP window size", type=int, default=5)
 parser.add_argument("-t", "--timeout", help="Define bTCP timeout in milliseconds", type=int, default=100)
-parser.add_argument("-o", "--output", help="Where to store file", default="tmp.file")
+parser.add_argument("-o", "--output", help="Where to store file", default="out.file")
 args = parser.parse_args()
 
 server_ip = "127.0.0.1"
@@ -133,48 +140,67 @@ fd_to_socket = {sock.fileno(): (sock, server_ip), }
 aux = {}
 close = {}
 
-
 while True:
-                                                                                                                                            
     # Wait for at least one of the sockets to be ready for processing
-    print('\nwaiting for the next event')
     events = poller.poll()
-
+    print(events)
     for fd, flag in events:
 
         # Retrieve the actual socket from its file descriptor
+        print("fd ", fd_to_socket)
         (s, client_address) = fd_to_socket[fd]
-        print(client_address)
+        # print(client_address)
 
         # Handle inputs
         if flag & (select.POLLIN | select.POLLPRI):
 
             if s is sock:
-                data, client_address = s.recvfrom(packet_size)
-                connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                connection.setblocking(False)
+                try:
+                    data, client_address = s.recvfrom(packet_size)
+                except BlockingIOError:
+                    continue
+                print("\nreceived")
+                print(unpack(header_format, data))
 
-                print('new connection from ', client_address)
-                fd_to_socket[connection.fileno()] = (connection, client_address)
-                poller.register(connection, READ_WRITE)
+                ok = -1
+                for sockets in fd_to_socket:
+                    if fd_to_socket[sockets][1] == client_address:
+                        ok = fd_to_socket[sockets][0]
 
-                file = open(args.output + client_address[0] + str(client_address[1]), "wb")
-                aux[connection] = [file, unpack("I", data[:4])[0], None, unpack("H", data[4:6])[0]]
+                connection = ok
+                if ok == -1:
+                    connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    connection.setblocking(False)
+
+                    # print('new connection from ', client_address)
+                    fd_to_socket[connection.fileno()] = (connection, client_address)
+                    poller.register(connection, READ_WRITE)
+
+                    file = open(args.output, "wb")
+                    aux[connection] = [file, unpack("I", data[:4])[0], None, unpack("H", data[4:6])[0]]
+                    message_queues[connection] = Queue()
+
                 _, seq_nr, response = react(data, *aux[connection])
 
                 # Give the connection a queue for data we want to send
-                message_queues[connection] = Queue()
+                while not message_queues[connection].empty():
+                    message_queues[connection].get_nowait()
                 for r in response:
                     message_queues[connection].put(r)
                 aux[connection][2] = response
                 aux[connection][3] = seq_nr
                 close[connection] = 0
             else:
-                data = s.recv(packet_size)
+                print("Catat", s, flag & select.POLLIN)
+                try:
+                    data = s.recv(packet_size)
+                except BlockingIOError:
+                    continue
 
                 if data:
                     # A readable client socket has data
-                    print('received "{}" from {}'.format(data, client_address))
+                    print("\nreceived")
+                    print(unpack(header_format, data))
                     flag, seq_nr, response = react(data, *aux[s])
                     for r in response:
                         message_queues[s].put(r)
@@ -208,10 +234,10 @@ while True:
                     # No messages waiting so stop checking for writability.
                     print('sending')
                     print(unpack(header_format, next_msg))
+                    print()
                     s.sendto(next_msg, client_address)
                 if close[s] is True:
                     close_connection(s)
-
 
         elif flag & select.POLLERR:
             print('handling exceptional condition for', client_address)
