@@ -85,7 +85,6 @@ def send_response(head, dat, l):
 
 while inputs:
     # Wait for at least one of the sockets to be ready for processing
-    # print('\nwaiting for the next event')
     readable, writable, exceptional = select(inputs, outputs, inputs, 1 / args.timeout)
     # Handle inputs
     for s in readable:
@@ -101,22 +100,12 @@ while inputs:
         if data:
             stream_id, syn_nr, ack_nr, flags, win, length, check, _ = unpack(header_format, data)
 
-            print("\nreceived")
-            print(stream_id, syn_nr, ack_nr, flags, win, length, check)
-            print()
-            # sleep(1)
-
             if crc32(bytes(data[:12] + data[16:])) != check:
-                print("corupt")
                 continue
             data = ''
-            print("integrity ok")
 
             expected = last[0]
             if expected[0] + (1 if flags == ACK or flags == FIN else 0) != ack_nr:
-                # print(expected[0] + (1 if flags == ACK else 0), ack_nr)
-                print("\nWrong order")
-                print(expected[0], ack_nr)
                 continue
 
             if finish is True:
@@ -165,10 +154,6 @@ while inputs:
     for s in writable:
         while queue.empty() is False:
             next_msg = queue.get_nowait()
-            print('\nsending')
-            print(unpack(header_format, next_msg))
-            print()
-            # sleep(1)
             s.sendto(next_msg, (destination_ip, destination_port))
         outputs.remove(s)
 
@@ -179,7 +164,7 @@ while inputs:
         close_socket(s)
 
     if not (readable or writable or exceptional):
-        print("timeout", finish, len(last), len(outputs))
+        print("timeout")
         if finish is True and len(last) == 0:
             close_socket(sock)
         else:

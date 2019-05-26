@@ -44,9 +44,6 @@ def build_acknowlwdge(stream_id, syn_nr, ack_nr, flags):
         d = 'K'
         length = 1
 
-    # print("\nSend:")
-    # print(stream_id, syn_nr, ack_nr, f, win, length, d)
-    # print()
     packet.append(create_packet(stream_id, syn_nr, ack_nr, f, win, length, d))
     return ack_nr, packet
 
@@ -62,7 +59,6 @@ def create_packet(stream_id, syn_nr, ack_nr, f, win, length, d):
 
 def checkorder(syn_nr, prev, addition):
     expected = (prev + addition)
-    print("order", syn_nr, expected)
     if prev is None:
         return 0
     elif syn_nr < expected or abs(syn_nr - expected) > expected:
@@ -76,9 +72,7 @@ def react(payload, f, s_id, prev, expected):
     if checkintegrity(payload) is False:
         return f, expected, prev
     stream_id, syn_nr, ack_nr, flags, win, length, check, load = unpack(header_format, payload)
-    # print("\nReceived:")
-    # print(stream_id, syn_nr, ack_nr, flags, win, length, check, load)
-    # print()
+
     if stream_id != s_id:
         print("There was a problem with the session")
         exit(1)
@@ -102,10 +96,10 @@ def close_connection(connection_socket):
     connection_socket.close()
     # Remove message queue
     del message_queues[connection_socket]
-
-    #Uncomment for test purpose
-    # sock.close()
-    # exit(0)
+    # Uncomment for test purpose
+    print("close")
+    sock.close()
+    exit(0)
 
 
 # Handle arguments
@@ -143,13 +137,10 @@ close = {}
 while True:
     # Wait for at least one of the sockets to be ready for processing
     events = poller.poll()
-    print(events)
     for fd, flag in events:
 
         # Retrieve the actual socket from its file descriptor
-        print("fd ", fd_to_socket)
         (s, client_address) = fd_to_socket[fd]
-        # print(client_address)
 
         # Handle inputs
         if flag & (select.POLLIN | select.POLLPRI):
@@ -159,8 +150,6 @@ while True:
                     data, client_address = s.recvfrom(packet_size)
                 except BlockingIOError:
                     continue
-                print("\nreceived")
-                print(unpack(header_format, data))
 
                 ok = -1
                 for sockets in fd_to_socket:
@@ -172,7 +161,6 @@ while True:
                     connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     connection.setblocking(False)
 
-                    # print('new connection from ', client_address)
                     fd_to_socket[connection.fileno()] = (connection, client_address)
                     poller.register(connection, READ_WRITE)
 
@@ -191,16 +179,14 @@ while True:
                 aux[connection][3] = seq_nr
                 close[connection] = 0
             else:
-                print("Catat", s, flag & select.POLLIN)
                 try:
                     data = s.recv(packet_size)
+                    print(unpack(header_format, data)[1])
                 except BlockingIOError:
                     continue
 
                 if data:
                     # A readable client socket has data
-                    print("\nreceived")
-                    print(unpack(header_format, data))
                     flag, seq_nr, response = react(data, *aux[s])
                     for r in response:
                         message_queues[s].put(r)
@@ -226,15 +212,11 @@ while True:
         elif flag & select.POLLOUT:
             # Socket is ready to send data, if there is any to send.
             if message_queues[s].empty():
-                print('output queue for', client_address, 'is empty')
                 poller.modify(s, READ_ONLY)
             else:
                 while not message_queues[s].empty():
                     next_msg = message_queues[s].get_nowait()
                     # No messages waiting so stop checking for writability.
-                    print('sending')
-                    print(unpack(header_format, next_msg))
-                    print()
                     s.sendto(next_msg, client_address)
                 if close[s] is True:
                     close_connection(s)
